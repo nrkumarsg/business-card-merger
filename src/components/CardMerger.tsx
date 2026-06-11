@@ -77,30 +77,35 @@ export default function CardMerger({
   // Automatically check active front and back cards in Review Queue
   useEffect(() => {
     if (!activePair) {
-      if (prevAutoSelectedIds.current.length > 0) {
-        setSelectedPairIds((prev) =>
-          prev.filter((id) => !prevAutoSelectedIds.current.includes(id))
-        );
+      if (prevAutoSelectedIds.current && prevAutoSelectedIds.current.length > 0) {
+        setSelectedPairIds((prev) => {
+          const currentPrev = Array.isArray(prev) ? prev : [];
+          return currentPrev.filter((id) => !prevAutoSelectedIds.current.includes(id));
+        });
         prevAutoSelectedIds.current = [];
       }
       return;
     }
 
-    const activeFrontId = activePair.frontFile.id;
+    const activeFrontId = activePair.frontFile?.id;
     const activeBackId = activePair.backFile?.id;
 
     const newAutoIds: string[] = [];
-    pairs.forEach((p) => {
-      const hasFrontMatch = p.frontFile.id === activeFrontId || p.backFile?.id === activeFrontId;
-      const hasBackMatch = activeBackId ? (p.frontFile.id === activeBackId || p.backFile?.id === activeBackId) : false;
-      if (hasFrontMatch || hasBackMatch) {
-        newAutoIds.push(p.id);
-      }
-    });
+    if (Array.isArray(pairs)) {
+      pairs.forEach((p) => {
+        if (!p) return;
+        const hasFrontMatch = p.frontFile?.id === activeFrontId || p.backFile?.id === activeFrontId;
+        const hasBackMatch = activeBackId ? (p.frontFile?.id === activeBackId || p.backFile?.id === activeBackId) : false;
+        if (hasFrontMatch || hasBackMatch) {
+          newAutoIds.push(p.id);
+        }
+      });
+    }
 
     setSelectedPairIds((prev) => {
+      const currentPrev = Array.isArray(prev) ? prev : [];
       // Remove previous auto-selected IDs
-      const filtered = prev.filter((id) => !prevAutoSelectedIds.current.includes(id));
+      const filtered = currentPrev.filter((id) => !prevAutoSelectedIds.current.includes(id));
       // Add new auto-selected IDs (avoid duplicates)
       const combined = [...filtered];
       newAutoIds.forEach((id) => {
