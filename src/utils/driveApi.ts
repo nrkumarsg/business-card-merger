@@ -277,3 +277,21 @@ export async function listGoogleContacts(token: string): Promise<ParsedCard[]> {
     return [];
   }
 }
+
+// Rename a file in Google Drive
+export async function renameFileInDrive(token: string, fileId: string, newName: string): Promise<void> {
+  const url = `https://www.googleapis.com/drive/v3/files/${fileId}`;
+  const res = await fetch(url, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ name: newName }),
+  });
+
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`Failed to rename file in Drive: ${errorText || res.statusText}`);
+  }
+}

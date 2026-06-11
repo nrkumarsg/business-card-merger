@@ -78,9 +78,16 @@ export default function CardMerger({
 
       // 3. Perform Drive save
       onUpdatePair({ ...pair, status: "saving" });
-      const filename = `Merged_${pair.frontFile.name.replace(/\.[^/.]+$/, "")}${
-        pair.backFile ? "_" + pair.backFile.name.replace(/\.[^/.]+$/, "") : ""
-      }.jpg`;
+      let filename = "";
+      if (pair.parsedData && pair.parsedData.name) {
+        const company = pair.parsedData.company ? pair.parsedData.company.trim().replace(/[/\\?%*:|"<>\s+]/g, "_") : "";
+        const name = pair.parsedData.name.trim().replace(/[/\\?%*:|"<>\s+]/g, "_");
+        filename = `${company ? company + "+" : ""}${name}.jpg`;
+      } else {
+        filename = `Merged_${pair.frontFile.name.replace(/\.[^/.]+$/, "")}${
+          pair.backFile ? "_" + pair.backFile.name.replace(/\.[^/.]+$/, "") : ""
+        }.jpg`;
+      }
 
       const savedFileId = await uploadMergedCard(token, mergedFolderId, filename, mergedBlob);
 
@@ -243,6 +250,20 @@ export default function CardMerger({
       }
 
       const contactResult: ParsedCard = await res.json();
+
+      if (pair.mergedFileId) {
+        try {
+          const company = contactResult.company ? contactResult.company.trim().replace(/[/\\?%*:|"<>\s+]/g, "_") : "";
+          const name = contactResult.name.trim().replace(/[/\\?%*:|"<>\s+]/g, "_");
+          const newName = `${company ? company + "+" : ""}${name}.jpg`;
+          
+          const { renameFileInDrive } = await import("../utils/driveApi");
+          await renameFileInDrive(token, pair.mergedFileId, newName);
+          console.log(`Renamed merged file in Drive to ${newName}`);
+        } catch (renameErr) {
+          console.error("Failed to rename file after AI parsing:", renameErr);
+        }
+      }
 
       onUpdatePair({
         ...pair,

@@ -126,6 +126,21 @@ export default function MergedCollection({
       }
 
       const contact: ParsedCard = await res.json();
+      
+      let newName = file.name;
+      try {
+        const company = contact.company ? contact.company.trim().replace(/[/\\?%*:|"<>\s+]/g, "_") : "";
+        const name = contact.name.trim().replace(/[/\\?%*:|"<>\s+]/g, "_");
+        newName = `${company ? company + "+" : ""}${name}.jpg`;
+        
+        const { renameFileInDrive } = await import("../utils/driveApi");
+        await renameFileInDrive(token, file.id, newName);
+        console.log(`Renamed historic file to ${newName}`);
+        setMergedFiles((prev) => prev.map((f) => (f.id === file.id ? { ...f, name: newName } : f)));
+      } catch (renameErr) {
+        console.error("Failed to rename historic file:", renameErr);
+      }
+
       onOpenAiSheet(contact, file.id);
     } catch (err: any) {
       console.error("Historical parse error:", err);
