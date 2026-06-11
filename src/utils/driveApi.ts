@@ -183,7 +183,6 @@ export async function saveGoogleContact(token: string, contact: ParsedCard): Pro
       {
         name: contact.company || "",
         title: contact.title || "",
-        primary: true,
       },
     ],
     emailAddresses: contact.emails.map((email) => ({
