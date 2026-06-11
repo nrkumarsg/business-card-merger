@@ -14,7 +14,7 @@ import {
   Contact,
   Users,
 } from "lucide-react";
-import { CardPair, ParsedCard } from "../types";
+import { CardPair, ParsedCard, DriveFile } from "../types";
 
 interface CardMergerProps {
   token: string;
@@ -24,6 +24,8 @@ interface CardMergerProps {
   onRemovePair: (id: string) => void;
   onClearAll: () => void;
   onAddContactToSaved: (contact: ParsedCard, cardId: string) => void;
+  rawFiles: DriveFile[];
+  onUpdateRawFiles: (files: DriveFile[]) => void;
 }
 
 export default function CardMerger({
@@ -34,6 +36,8 @@ export default function CardMerger({
   onRemovePair,
   onClearAll,
   onAddContactToSaved,
+  rawFiles,
+  onUpdateRawFiles,
 }: CardMergerProps) {
   const [activePairId, setActivePairId] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -45,6 +49,7 @@ export default function CardMerger({
   const [editingCard, setEditingCard] = useState<ParsedCard | null>(null);
   const [editingCardId, setEditingCardId] = useState<string | null>(null);
   const [isSavingContact, setIsSavingContact] = useState(false);
+  const [currentMergedBlob, setCurrentMergedBlob] = useState<Blob | null>(null);
 
   // Filter pairs
   useEffect(() => {
@@ -226,6 +231,7 @@ export default function CardMerger({
       }
 
       const mergedBlob = await compileUnifiedBlob(frontBlob, backBlob, pair.layout, pair.gapSize, pair.spacerColor);
+      setCurrentMergedBlob(mergedBlob);
 
       // Convert combined JPEG blob to base64
       const base64Data = await new Promise<string>((resolve, reject) => {
@@ -286,32 +292,78 @@ export default function CardMerger({
     }
   };
 
-  // Synchronise edited details back to Google Contacts (requires Google People API)
+  // Synchronise edited details back to Google Contacts, upload merged image, and archive/delete raw files
   const handleSaveToGoogleContacts = async () => {
-    if (!editingCard || !editingCardId) return;
+    if (!editingCard || !editingCardId || !token) return;
     setIsSavingContact(true);
 
     try {
-      const { saveGoogleContact } = await import("../utils/driveApi");
-      await saveGoogleContact(token, editingCard);
+      const activePair = pairs.find((p) => p.id === editingCardId);
+      if (!activePair) throw new Error("Active pair not found in queue");
 
-      // Save locally to logged history and update status
-      onAddContactToSaved(editingCard, editingCardId);
+      const { saveGoogleContact, uploadMergedCard, trashFileFromDrive } = await import("../utils/driveApi");
 
-      const affectedPair = pairs.find((p) => p.id === editingCardId);
-      if (affectedPair) {
-        onUpdatePair({
-          ...affectedPair,
-          status: "saved", // Contact completed and saved
-        });
+      // 1. Compile the merged blob if not already in state
+      let mergedBlob = currentMergedBlob;
+      if (!mergedBlob) {
+        const { downloadFileAsBlob } = await import("../utils/driveApi");
+        const frontBlob = await downloadFileAsBlob(token, activePair.frontFile.id);
+        const backBlob = activePair.backFile ? await downloadFileAsBlob(token, activePair.backFile.id) : null;
+        mergedBlob = await compileUnifiedBlob(frontBlob, backBlob, activePair.layout, activePair.gapSize, activePair.spacerColor);
       }
 
-      alert("Contact successfully saved inside your Google Contacts CRM!");
+      // 2. Generate filename: CompanyName+ContactName.jpg
+      const company = editingCard.company ? editingCard.company.trim().replace(/[/\\?%*:|"<>\s+]/g, "_") : "";
+      const name = editingCard.name.trim().replace(/[/\\?%*:|"<>\s+]/g, "_");
+      const filename = `${company ? company + "+" : ""}${name}.jpg`;
+
+      // 3. Save Merged Card to Google Drive
+      console.log(`Saving merged card to Drive: ${filename}`);
+      await uploadMergedCard(token, mergedFolderId, filename, mergedBlob);
+
+      // 4. Save contact to Google Contacts CRM
+      console.log("Saving contact to Google Contacts...");
+      await saveGoogleContact(token, editingCard);
+
+      // 5. Delete source files from Google Drive
+      const frontId = activePair.frontFile.id;
+      const backId = activePair.backFile?.id;
+
+      console.log(`Deleting source file from Drive: ${frontId}`);
+      await trashFileFromDrive(token, frontId);
+      if (backId) {
+        console.log(`Deleting source file from Drive: ${backId}`);
+        await trashFileFromDrive(token, backId);
+      }
+
+      // 6. Update local files list to filter out deleted files
+      const updatedRawFiles = rawFiles.filter((f) => f.id !== frontId && f.id !== backId);
+      onUpdateRawFiles(updatedRawFiles);
+
+      // 7. Save locally to logged history
+      onAddContactToSaved(editingCard, editingCardId);
+
+      // 8. Remove the completed pair from queue
+      onRemovePair(editingCardId);
+
+      // 9. Auto-select next pair in queue if available
+      const remainingPairs = pairs.filter((p) => p.id !== editingCardId);
+      if (remainingPairs.length > 0) {
+        setActivePairId(remainingPairs[0].id);
+      } else {
+        setActivePairId(null);
+      }
+
+      alert("Successfully merged card, saved contact, and archived/deleted raw scans!");
+      
+      // Close side panel
       setEditingCard(null);
       setEditingCardId(null);
+      setCurrentMergedBlob(null);
+
     } catch (err: any) {
-      console.error("Contacts syncing error:", err);
-      alert(`Syncing failed: ${err.message || err}`);
+      console.error("Archiving/publishing failed:", err);
+      alert(`Operation failed: ${err.message || err}`);
     } finally {
       setIsSavingContact(false);
     }
@@ -440,31 +492,9 @@ export default function CardMerger({
               </div>
 
               <div className="flex gap-2 shrink-0">
-                <button
-                  type="button"
-                  id="btn-merge-single"
-                  disabled={activePair.status === "merging" || activePair.status === "saving" || isProcessing}
-                  onClick={() => handleMergeAndSavePair(activePair)}
-                  className="flex items-center gap-1.5 bg-white/[0.04] border border-white/[0.08] hover:bg-white/[0.1] text-slate-200 px-3 py-1.5 rounded-lg text-xs font-bold transition-all disabled:opacity-40 cursor-pointer"
-                >
-                  <Save className="w-3.5 h-3.5" />
-                  Stitch and Save
-                </button>
-
-                <button
-                  type="button"
-                  id="btn-ai-parse"
-                  disabled={activePair.status === "parsing" || isParsingId !== null}
-                  onClick={() => handleParseCardWithAI(activePair)}
-                  className="flex items-center gap-1.5 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 hover:from-indigo-600 hover:via-purple-600 hover:to-pink-600 text-white px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all shadow-[0_4px_20px_rgba(168,85,247,0.3)] hover:shadow-[0_4px_25px_rgba(168,85,247,0.55)] cursor-pointer"
-                >
-                  {isParsingId === activePair.id ? (
-                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                  ) : (
-                    <Sparkles className="w-3.5 h-3.5" />
-                  )}
-                  {activePair.status === "parsed" ? "Re-Run AI OCR" : "Run AI Parser"}
-                </button>
+                <span className="text-[10px] bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 text-xs font-semibold px-2.5 py-0.5 rounded-full capitalize">
+                  {activePair.status}
+                </span>
               </div>
             </div>
 
@@ -526,62 +556,124 @@ export default function CardMerger({
             </div>
 
             {/* Workspace live render canvas / preview space */}
-            <div className="flex-1 bg-black/20 rounded-xl border border-white/[0.06] overflow-hidden flex items-center justify-center p-4 relative">
-              <div className="flex gap-4 max-w-full max-h-[300px] overflow-auto select-none items-center justify-center">
-                <div className="flex flex-col items-center">
-                  <div className="aspect-[3/2] w-36 overflow-hidden rounded-lg bg-black/40 shadow-lg border border-white/[0.06] relative">
+            <div className="flex-1 bg-black/20 rounded-xl border border-white/[0.06] overflow-hidden flex flex-col items-center justify-between p-4 relative">
+              <div className="flex-1 w-full flex flex-col md:flex-row gap-6 items-center justify-center overflow-y-auto max-h-[300px] p-2">
+                {/* Front side card display */}
+                <div className="flex flex-col items-center space-y-2">
+                  <span className="text-[10px] text-indigo-400 font-bold uppercase tracking-wider">
+                    Front Side Card
+                  </span>
+                  <div className="aspect-[3/2] w-56 md:w-64 overflow-hidden rounded-xl bg-black/40 shadow-lg border border-white/[0.08] relative">
                     {activePair.frontFile.thumbnailLink ? (
                       <img
-                        src={activePair.frontFile.thumbnailLink}
+                        src={activePair.frontFile.thumbnailLink.replace(/=s\d+/, "=s500")}
                         alt="Front"
                         className="w-full h-full object-contain"
                       />
                     ) : (
-                      <span className="text-[10px] text-slate-500 flex items-center justify-center h-full">Front image</span>
+                      <span className="text-xs text-slate-500 flex items-center justify-center h-full">Front image</span>
                     )}
-                    <span className="absolute bottom-1 left-1 bg-indigo-500/80 text-white text-[9px] font-bold px-1.5 py-0.5 rounded">
-                      Front
-                    </span>
                   </div>
-                  <span className="text-[10px] text-slate-400 mt-1.5 truncate max-w-[120px]">
-                    {activePair.frontFile.name}
-                  </span>
+                  
+                  {/* Front dropdown selector */}
+                  <div className="w-56 md:w-64">
+                    <select
+                      value={activePair.frontFile.id}
+                      onChange={(e) => {
+                        const selected = rawFiles.find((f) => f.id === e.target.value);
+                        if (selected) {
+                          onUpdatePair({
+                            ...activePair,
+                            frontFile: selected,
+                            name: selected.name,
+                          });
+                        }
+                      }}
+                      className="w-full bg-slate-900 border border-white/[0.08] text-white rounded-lg p-2 text-xs font-semibold outline-none focus:border-indigo-500"
+                    >
+                      {rawFiles.map((file) => (
+                        <option key={file.id} value={file.id}>
+                          {file.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
 
-                <ArrowRight className="w-5 h-5 text-slate-500 shrink-0" />
+                <ArrowRight className="hidden md:block w-6 h-6 text-slate-500 shrink-0" />
 
-                <div className="flex flex-col items-center">
-                  <div className="aspect-[3/2] w-36 overflow-hidden rounded-lg bg-black/40 shadow-lg border border-white/[0.06] relative flex items-center justify-center">
+                {/* Back side card display */}
+                <div className="flex flex-col items-center space-y-2">
+                  <span className="text-[10px] text-indigo-400 font-bold uppercase tracking-wider">
+                    Back Side Card
+                  </span>
+                  <div className="aspect-[3/2] w-56 md:w-64 overflow-hidden rounded-xl bg-black/40 shadow-lg border border-white/[0.08] relative flex items-center justify-center">
                     {activePair.backFile ? (
                       <>
                         <img
-                          src={activePair.backFile.thumbnailLink}
+                          src={activePair.backFile.thumbnailLink?.replace(/=s\d+/, "=s500")}
                           alt="Back"
                           className="w-full h-full object-contain"
                         />
-                        <span className="absolute bottom-1 left-1 bg-indigo-600/80 text-white text-[9px] font-bold px-1.5 py-0.5 rounded">
-                          Back
-                        </span>
                         <button
                           type="button"
                           onClick={() => onUpdatePair({ ...activePair, backFile: undefined })}
-                          className="absolute top-1 right-1 bg-black/60 hover:bg-rose-500/20 text-rose-400 p-1 rounded border border-white/[0.06] shadow-sm transition-colors cursor-pointer"
-                          title="Erase"
+                          className="absolute top-2 right-2 bg-black/60 hover:bg-rose-500/20 text-rose-400 p-1.5 rounded-lg border border-white/[0.06] shadow-sm transition-colors cursor-pointer"
+                          title="Clear Back Side"
                         >
-                          <Trash2 className="w-2.5 h-2.5" />
+                          <Trash2 className="w-3.5 h-3.5" />
                         </button>
                       </>
                     ) : (
-                      <div className="text-center p-2 text-[10px] text-slate-500 flex flex-col items-center justify-center leading-normal">
-                        <span className="italic block text-slate-450 text-[10px]">No back card loaded</span>
-                        <span className="text-[9px] opacity-60">Suggestions helper active</span>
+                      <div className="text-center p-4 text-xs text-slate-500 flex flex-col items-center justify-center leading-normal">
+                        <span className="italic block font-semibold text-slate-400">No back side selected</span>
+                        <span className="text-[10px] opacity-65 mt-1">Select from dropdown below</span>
                       </div>
                     )}
                   </div>
-                  <span className="text-[10px] text-slate-400 mt-1.5 truncate max-w-[120px]">
-                    {activePair.backFile ? activePair.backFile.name : "(Single Sided)"}
-                  </span>
+                  
+                  {/* Back dropdown selector */}
+                  <div className="w-56 md:w-64">
+                    <select
+                      value={activePair.backFile?.id || ""}
+                      onChange={(e) => {
+                        const selected = rawFiles.find((f) => f.id === e.target.value);
+                        onUpdatePair({
+                          ...activePair,
+                          backFile: selected,
+                        });
+                      }}
+                      className="w-full bg-slate-900 border border-white/[0.08] text-white rounded-lg p-2 text-xs font-semibold outline-none focus:border-indigo-500"
+                    >
+                      <option value="">-- No Back Card --</option>
+                      {rawFiles
+                        .filter((f) => f.id !== activePair.frontFile.id)
+                        .map((file) => (
+                          <option key={file.id} value={file.id}>
+                            {file.name}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
                 </div>
+              </div>
+
+              {/* Action trigger button below images */}
+              <div className="w-full pt-4 border-t border-white/[0.06] flex justify-center shrink-0">
+                <button
+                  type="button"
+                  id="btn-stitch-and-parse"
+                  disabled={activePair.status === "parsing" || isParsingId !== null}
+                  onClick={() => handleParseCardWithAI(activePair)}
+                  className="w-full max-w-md py-3 px-6 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 hover:from-indigo-600 hover:via-purple-600 hover:to-pink-600 text-white rounded-xl text-xs font-bold transition-all shadow-[0_4px_20px_rgba(168,85,247,0.35)] hover:shadow-[0_4px_25px_rgba(168,85,247,0.6)] flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  {isParsingId === activePair.id ? (
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Sparkles className="w-4 h-4" />
+                  )}
+                  Stitch and Run AI Parser
+                </button>
               </div>
 
               {/* Status / Log notification elements in workframe */}

@@ -139,6 +139,19 @@ export default function App() {
     try {
       const files = await listFilesByFolder(token, folderId);
       setRawFiles(files);
+      
+      // Auto-populate review queue with all scanned scans, using vertical default layout
+      const initialPairs = files.map((file, idx) => ({
+        id: `auto-${file.id}-${idx}`,
+        name: file.name,
+        frontFile: file,
+        backFile: undefined,
+        status: "idle" as const,
+        layout: "vertical" as const,
+        spacerColor: "#ffffff",
+        gapSize: 10,
+      }));
+      setQueuePairs(initialPairs);
     } catch (err) {
       console.error("Failed to load raw scans:", err);
     } finally {
@@ -411,6 +424,8 @@ export default function App() {
               onRemovePair={handleRemovePair}
               onClearAll={handleClearAllPairs}
               onAddContactToSaved={handleAddContactToSaved}
+              rawFiles={rawFiles}
+              onUpdateRawFiles={setRawFiles}
             />
 
             {/* In-App Drive quick picker footer inside Workspace tab if queue is low */}
