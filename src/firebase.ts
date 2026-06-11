@@ -14,8 +14,7 @@ export const auth = getAuth(app);
 
 // Configure Google OAuth with requested scopes
 export const googleProvider = new GoogleAuthProvider();
-googleProvider.addScope("https://www.googleapis.com/auth/drive.readonly");
-googleProvider.addScope("https://www.googleapis.com/auth/drive.file");
+googleProvider.addScope("https://www.googleapis.com/auth/drive");
 googleProvider.addScope("https://www.googleapis.com/auth/contacts");
 
 // Use in-memory caching for OAuth access token as recommended by systems safety guidelines
