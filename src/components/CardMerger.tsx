@@ -557,7 +557,7 @@ export default function CardMerger({
 
             {/* Workspace live render canvas / preview space */}
             <div className="flex-1 bg-black/20 rounded-xl border border-white/[0.06] overflow-hidden flex flex-col items-center justify-between p-4 relative">
-              <div className="flex-1 w-full flex flex-col md:flex-row gap-6 items-center justify-center overflow-y-auto max-h-[300px] p-2">
+              <div className="flex-1 w-full flex flex-col md:flex-row gap-6 items-center justify-center overflow-y-auto max-h-[420px] p-2">
                 {/* Front side card display */}
                 <div className="flex flex-col items-center space-y-2">
                   <span className="text-[10px] text-indigo-400 font-bold uppercase tracking-wider">
@@ -575,28 +575,43 @@ export default function CardMerger({
                     )}
                   </div>
                   
-                  {/* Front dropdown selector */}
+                  {/* Front visual scroller */}
                   <div className="w-56 md:w-64">
-                    <select
-                      value={activePair.frontFile.id}
-                      onChange={(e) => {
-                        const selected = rawFiles.find((f) => f.id === e.target.value);
-                        if (selected) {
-                          onUpdatePair({
-                            ...activePair,
-                            frontFile: selected,
-                            name: selected.name,
-                          });
-                        }
-                      }}
-                      className="w-full bg-slate-900 border border-white/[0.08] text-white rounded-lg p-2 text-xs font-semibold outline-none focus:border-indigo-500"
-                    >
-                      {rawFiles.map((file) => (
-                        <option key={file.id} value={file.id}>
-                          {file.name}
-                        </option>
-                      ))}
-                    </select>
+                    <div className="flex gap-2 overflow-x-auto p-1.5 border border-white/[0.06] rounded-xl bg-black/30 h-20 items-center scrollbar-thin scrollbar-thumb-indigo-500/50 scrollbar-track-transparent">
+                      {rawFiles.map((file) => {
+                        const isSelected = activePair.frontFile.id === file.id;
+                        return (
+                          <button
+                            key={file.id}
+                            type="button"
+                            onClick={() => {
+                              onUpdatePair({
+                                ...activePair,
+                                frontFile: file,
+                                name: file.name,
+                              });
+                            }}
+                            className={`h-14 w-20 flex-shrink-0 rounded-lg overflow-hidden border transition-all cursor-pointer relative ${
+                              isSelected
+                                ? "border-indigo-500 ring-2 ring-indigo-500/25 shadow-md shadow-indigo-500/25 scale-95"
+                                : "border-white/[0.06] hover:border-white/[0.15] opacity-70 hover:opacity-100"
+                            }`}
+                            title={file.name}
+                          >
+                            {file.thumbnailLink ? (
+                              <img
+                                src={file.thumbnailLink}
+                                alt={file.name}
+                                referrerPolicy="no-referrer"
+                                className="w-full h-full object-cover"
+                              />
+                            ) : (
+                              <span className="text-[9px] text-slate-500 flex items-center justify-center h-full">No image</span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
                 </div>
 
@@ -627,33 +642,67 @@ export default function CardMerger({
                     ) : (
                       <div className="text-center p-4 text-xs text-slate-500 flex flex-col items-center justify-center leading-normal">
                         <span className="italic block font-semibold text-slate-400">No back side selected</span>
-                        <span className="text-[10px] opacity-65 mt-1">Select from dropdown below</span>
+                        <span className="text-[10px] opacity-65 mt-1">Select visual thumbnail below</span>
                       </div>
                     )}
                   </div>
                   
-                  {/* Back dropdown selector */}
+                  {/* Back visual scroller */}
                   <div className="w-56 md:w-64">
-                    <select
-                      value={activePair.backFile?.id || ""}
-                      onChange={(e) => {
-                        const selected = rawFiles.find((f) => f.id === e.target.value);
-                        onUpdatePair({
-                          ...activePair,
-                          backFile: selected,
-                        });
-                      }}
-                      className="w-full bg-slate-900 border border-white/[0.08] text-white rounded-lg p-2 text-xs font-semibold outline-none focus:border-indigo-500"
-                    >
-                      <option value="">-- No Back Card --</option>
+                    <div className="flex gap-2 overflow-x-auto p-1.5 border border-white/[0.06] rounded-xl bg-black/30 h-20 items-center scrollbar-thin scrollbar-thumb-indigo-500/50 scrollbar-track-transparent">
+                      {/* "None" option */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onUpdatePair({
+                            ...activePair,
+                            backFile: undefined,
+                          });
+                        }}
+                        className={`h-14 w-20 flex-shrink-0 rounded-lg overflow-hidden border transition-all cursor-pointer flex flex-col items-center justify-center text-[9px] font-bold ${
+                          !activePair.backFile
+                            ? "border-indigo-500 bg-indigo-500/10 text-indigo-400 ring-2 ring-indigo-500/25 scale-95"
+                            : "border-white/[0.06] hover:border-white/[0.15] text-slate-400 hover:text-slate-200 bg-white/[0.02]"
+                        }`}
+                      >
+                        No Back
+                      </button>
+
                       {rawFiles
                         .filter((f) => f.id !== activePair.frontFile.id)
-                        .map((file) => (
-                          <option key={file.id} value={file.id}>
-                            {file.name}
-                          </option>
-                        ))}
-                    </select>
+                        .map((file) => {
+                          const isSelected = activePair.backFile?.id === file.id;
+                          return (
+                            <button
+                              key={file.id}
+                              type="button"
+                              onClick={() => {
+                                onUpdatePair({
+                                  ...activePair,
+                                  backFile: file,
+                                });
+                              }}
+                              className={`h-14 w-20 flex-shrink-0 rounded-lg overflow-hidden border transition-all cursor-pointer relative ${
+                                isSelected
+                                  ? "border-indigo-500 ring-2 ring-indigo-500/25 shadow-md shadow-indigo-500/25 scale-95"
+                                  : "border-white/[0.06] hover:border-white/[0.15] opacity-70 hover:opacity-100"
+                              }`}
+                              title={file.name}
+                            >
+                              {file.thumbnailLink ? (
+                                <img
+                                  src={file.thumbnailLink}
+                                  alt={file.name}
+                                  referrerPolicy="no-referrer"
+                                  className="w-full h-full object-cover"
+                                />
+                              ) : (
+                                <span className="text-[9px] text-slate-500 flex items-center justify-center h-full">No image</span>
+                              )}
+                            </button>
+                          );
+                        })}
+                    </div>
                   </div>
                 </div>
               </div>
