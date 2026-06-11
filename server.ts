@@ -129,17 +129,85 @@ app.post("/api/parser", async (req, res): Promise<any> => {
       return res.status(400).json({ error: "Missing image base64 data" });
     }
 
-    const ai = getGeminiClient();
     const cleanBase64 = base64.replace(/^data:image\/\w+;base64,/, "");
     const cleanMimeType = mimeType || "image/jpeg";
 
+    const openaiKey = process.env.OPENAI_API_KEY;
+    if (openaiKey) {
+      console.log("[OpenAI] Using GPT-4o-mini for parsing card");
+      const promptText = `
+You are an advanced, expert AI business card reader.
+Parse the contact information from this scanned business card.
+Check both sides if they are merged horizontally or vertically.
+Verify the spelling of names, emails, and phone numbers.
+Extract URLs, social profiles (LinkedIn, X/Twitter, etc.), physical address, company, and job title.
+In the "notes" field, summarize the card's business category, specializations listed on the card, or other tags.
+Return a valid JSON output matching this schema: {
+  "name": "Full name of the contact (required)",
+  "company": "Company or organization name",
+  "title": "Job title or position",
+  "emails": ["email1"],
+  "phones": ["phone1"],
+  "websites": ["website1"],
+  "address": "physical street address",
+  "socials": ["social profiles"],
+  "notes": "summary description or tags"
+}
+      `;
+
+      const response = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${openaiKey}`
+        },
+        body: JSON.stringify({
+          model: "gpt-4o-mini",
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: promptText
+                },
+                {
+                  type: "image_url",
+                  image_url: {
+                    url: `data:${cleanMimeType};base64,${cleanBase64}`
+                  }
+                }
+              ]
+            }
+          ],
+          response_format: { type: "json_object" }
+        })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`OpenAI API error: ${errorText || response.statusText}`);
+      }
+
+      const resJson = await response.json();
+      const parsedText = resJson.choices[0]?.message?.content;
+      if (!parsedText) {
+        throw new Error("No response content from OpenAI API");
+      }
+
+      const parsedData = JSON.parse(parsedText);
+      return res.json(parsedData);
+    }
+
+    // Fallback to Gemini
+    const ai = getGeminiClient();
     const promptText = `
 You are an advanced, expert AI business card reader.
 Parse the contact information from this scanned business card.
 Check both sides if they are merged horizontally or vertically.
 Verify the spelling of names, emails, and phone numbers.
 Extract URLs, social profiles (LinkedIn, X/Twitter, etc.), physical address, company, and job title.
-In the \"notes\" field, summarize the card's business category, specializations listed on the card, or other tags.
+In the "notes" field, summarize the card's business category, specializations listed on the card, or other tags.
 Return a valid JSON output matching the required schema. Ensure Name is extracted correctly.
     `;
 
