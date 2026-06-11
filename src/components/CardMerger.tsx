@@ -13,6 +13,7 @@ import {
   AlertTriangle,
   Contact,
   Users,
+  X,
 } from "lucide-react";
 import { CardPair, ParsedCard, DriveFile } from "../types";
 
@@ -51,6 +52,12 @@ export default function CardMerger({
   const [isSavingContact, setIsSavingContact] = useState(false);
   const [currentMergedBlob, setCurrentMergedBlob] = useState<Blob | null>(null);
 
+  // Original image blobs for high-res display
+  const [frontBlobUrl, setFrontBlobUrl] = useState<string | null>(null);
+  const [backBlobUrl, setBackBlobUrl] = useState<string | null>(null);
+  const [isLoadingImages, setIsLoadingImages] = useState(false);
+  const [mergedBlobUrl, setMergedBlobUrl] = useState<string | null>(null);
+
   // Filter pairs
   useEffect(() => {
     if (pairs.length > 0 && !activePairId) {
@@ -62,7 +69,63 @@ export default function CardMerger({
 
   const activePair = pairs.find((p) => p.id === activePairId) || null;
 
-  // Single Merge & Save Core Logic
+  // Background fetch for original uncropped images
+  useEffect(() => {
+    let active = true;
+    const loadImages = async () => {
+      if (!token || !activePair) {
+        setFrontBlobUrl(null);
+        setBackBlobUrl(null);
+        return;
+      }
+
+      // If already parsed/saved, don't attempt to load raw files (they are deleted)
+      if (activePair.status === "parsed" || activePair.status === "saved") {
+        setFrontBlobUrl(null);
+        setBackBlobUrl(null);
+        return;
+      }
+
+      setIsLoadingImages(true);
+      try {
+        const { downloadFileAsBlob } = await import("../utils/driveApi");
+        
+        const fBlob = await downloadFileAsBlob(token, activePair.frontFile.id);
+        if (!active) return;
+        const fUrl = URL.createObjectURL(fBlob);
+        setFrontBlobUrl(fUrl);
+
+        if (activePair.backFile) {
+          const bBlob = await downloadFileAsBlob(token, activePair.backFile.id);
+          if (!active) return;
+          const bUrl = URL.createObjectURL(bBlob);
+          setBackBlobUrl(bUrl);
+        } else {
+          setBackBlobUrl(null);
+        }
+      } catch (err) {
+        console.error("Error loading original high-res card images:", err);
+      } finally {
+        if (active) setIsLoadingImages(false);
+      }
+    };
+
+    loadImages();
+
+    return () => {
+      active = false;
+      setFrontBlobUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return null;
+      });
+      setBackBlobUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return null;
+      });
+    };
+  }, [activePairId, activePair?.frontFile?.id, activePair?.backFile?.id, token]);
+
+  // Single Merge & Save Core Logic (Legacy fallback for batch / multi-save tool)
   const handleMergeAndSavePair = async (pair: CardPair): Promise<string | null> => {
     if (!token || !mergedFolderId) return null;
 
@@ -204,7 +267,7 @@ export default function CardMerger({
 
     for (let i = 0; i < pairs.length; i++) {
       const pair = pairs[i];
-      if (pair.status !== "saved") {
+      if (pair.status !== "saved" && pair.status !== "parsed") {
         setMultiSaveProgress({ current: i + 1, total: pairs.length });
         await handleMergeAndSavePair(pair);
       }
@@ -213,7 +276,7 @@ export default function CardMerger({
     setIsMultiSaving(false);
   };
 
-  // Run AI parsing on a merged card
+  // Run AI parsing on a merged card, save to destination immediately, and delete raw cards
   const handleParseCardWithAI = async (pair: CardPair) => {
     if (!token) return;
     setIsParsingId(pair.id);
@@ -221,7 +284,7 @@ export default function CardMerger({
     try {
       onUpdatePair({ ...pair, status: "parsing" });
 
-      const { downloadFileAsBlob } = await import("../utils/driveApi");
+      const { downloadFileAsBlob, uploadMergedCard, trashFileFromDrive } = await import("../utils/driveApi");
 
       // 1. Compile locally on the client to a binary blob first to feed the parser
       const frontBlob = await downloadFileAsBlob(token, pair.frontFile.id);
@@ -232,6 +295,9 @@ export default function CardMerger({
 
       const mergedBlob = await compileUnifiedBlob(frontBlob, backBlob, pair.layout, pair.gapSize, pair.spacerColor);
       setCurrentMergedBlob(mergedBlob);
+      
+      const mergedUrl = URL.createObjectURL(mergedBlob);
+      setMergedBlobUrl(mergedUrl);
 
       // Convert combined JPEG blob to base64
       const base64Data = await new Promise<string>((resolve, reject) => {
@@ -257,42 +323,55 @@ export default function CardMerger({
 
       const contactResult: ParsedCard = await res.json();
 
-      if (pair.mergedFileId) {
-        try {
-          const company = contactResult.company ? contactResult.company.trim().replace(/[/\\?%*:|"<>\s+]/g, "_") : "";
-          const name = contactResult.name.trim().replace(/[/\\?%*:|"<>\s+]/g, "_");
-          const newName = `${company ? company + "+" : ""}${name}.jpg`;
-          
-          const { renameFileInDrive } = await import("../utils/driveApi");
-          await renameFileInDrive(token, pair.mergedFileId, newName);
-          console.log(`Renamed merged file in Drive to ${newName}`);
-        } catch (renameErr) {
-          console.error("Failed to rename file after AI parsing:", renameErr);
-        }
+      // 3. Immediately upload the merged card to Drive
+      onUpdatePair({ ...pair, status: "saving" });
+      const company = contactResult.company ? contactResult.company.trim().replace(/[/\\?%*:|"<>\s+]/g, "_") : "";
+      const name = contactResult.name.trim().replace(/[/\\?%*:|"<>\s+]/g, "_");
+      const filename = `${company ? company + "+" : ""}${name}.jpg`;
+
+      const savedFileId = await uploadMergedCard(token, mergedFolderId, filename, mergedBlob);
+      console.log(`Uploaded merged card to Google Drive with ID: ${savedFileId}`);
+
+      // 4. Immediately delete front and back source files from Google Drive
+      const frontId = pair.frontFile.id;
+      const backId = pair.backFile?.id;
+
+      console.log(`Deleting raw front card: ${frontId}`);
+      await trashFileFromDrive(token, frontId);
+      if (backId) {
+        console.log(`Deleting raw back card: ${backId}`);
+        await trashFileFromDrive(token, backId);
       }
 
+      // 5. Update local raw files list to remove deleted scans
+      const updatedRawFiles = rawFiles.filter((f) => f.id !== frontId && (!backId || f.id !== backId));
+      onUpdateRawFiles(updatedRawFiles);
+
+      // 6. Update pair state
       onUpdatePair({
         ...pair,
         status: "parsed",
         parsedData: contactResult,
+        mergedFileId: savedFileId,
+        mergedLocalUrl: mergedUrl,
       });
 
-      // Open side-deck immediately for the parsed details
+      // 7. Load merged image and editable contact details inside modal
       setEditingCard(contactResult);
       setEditingCardId(pair.id);
     } catch (err: any) {
-      console.error("AI Parse Error:", err);
+      console.error("AI Parse & Stitch Pipeline Error:", err);
       onUpdatePair({
         ...pair,
         status: "error",
-        error: `AI Parsing Failed: ${err.message || err}`,
+        error: `AI Stitch/Parse Pipeline Failed: ${err.message || err}`,
       });
     } finally {
       setIsParsingId(null);
     }
   };
 
-  // Synchronise edited details back to Google Contacts, upload merged image, and archive/delete raw files
+  // Synchronise edited details back to Google Contacts CRM and rename merged card in Drive if details changed
   const handleSaveToGoogleContacts = async () => {
     if (!editingCard || !editingCardId || !token) return;
     setIsSavingContact(true);
@@ -301,52 +380,35 @@ export default function CardMerger({
       const activePair = pairs.find((p) => p.id === editingCardId);
       if (!activePair) throw new Error("Active pair not found in queue");
 
-      const { saveGoogleContact, uploadMergedCard, trashFileFromDrive } = await import("../utils/driveApi");
+      const { saveGoogleContact, renameFileInDrive } = await import("../utils/driveApi");
 
-      // 1. Compile the merged blob if not already in state
-      let mergedBlob = currentMergedBlob;
-      if (!mergedBlob) {
-        const { downloadFileAsBlob } = await import("../utils/driveApi");
-        const frontBlob = await downloadFileAsBlob(token, activePair.frontFile.id);
-        const backBlob = activePair.backFile ? await downloadFileAsBlob(token, activePair.backFile.id) : null;
-        mergedBlob = await compileUnifiedBlob(frontBlob, backBlob, activePair.layout, activePair.gapSize, activePair.spacerColor);
+      // 1. Rename merged card in Google Drive if details changed
+      if (activePair.mergedFileId && activePair.parsedData) {
+        const originalCompany = activePair.parsedData.company ? activePair.parsedData.company.trim().replace(/[/\\?%*:|"<>\s+]/g, "_") : "";
+        const originalName = activePair.parsedData.name ? activePair.parsedData.name.trim().replace(/[/\\?%*:|"<>\s+]/g, "_") : "";
+        const originalFilename = `${originalCompany ? originalCompany + "+" : ""}${originalName}.jpg`;
+
+        const currentCompany = editingCard.company ? editingCard.company.trim().replace(/[/\\?%*:|"<>\s+]/g, "_") : "";
+        const currentName = editingCard.name ? editingCard.name.trim().replace(/[/\\?%*:|"<>\s+]/g, "_") : "";
+        const currentFilename = `${currentCompany ? currentCompany + "+" : ""}${currentName}.jpg`;
+
+        if (currentFilename !== originalFilename) {
+          console.log(`Renaming merged card in Drive: ${originalFilename} -> ${currentFilename}`);
+          await renameFileInDrive(token, activePair.mergedFileId, currentFilename);
+        }
       }
 
-      // 2. Generate filename: CompanyName+ContactName.jpg
-      const company = editingCard.company ? editingCard.company.trim().replace(/[/\\?%*:|"<>\s+]/g, "_") : "";
-      const name = editingCard.name.trim().replace(/[/\\?%*:|"<>\s+]/g, "_");
-      const filename = `${company ? company + "+" : ""}${name}.jpg`;
-
-      // 3. Save Merged Card to Google Drive
-      console.log(`Saving merged card to Drive: ${filename}`);
-      await uploadMergedCard(token, mergedFolderId, filename, mergedBlob);
-
-      // 4. Save contact to Google Contacts CRM
+      // 2. Save contact to Google Contacts CRM
       console.log("Saving contact to Google Contacts...");
       await saveGoogleContact(token, editingCard);
 
-      // 5. Delete source files from Google Drive
-      const frontId = activePair.frontFile.id;
-      const backId = activePair.backFile?.id;
-
-      console.log(`Deleting source file from Drive: ${frontId}`);
-      await trashFileFromDrive(token, frontId);
-      if (backId) {
-        console.log(`Deleting source file from Drive: ${backId}`);
-        await trashFileFromDrive(token, backId);
-      }
-
-      // 6. Update local files list to filter out deleted files
-      const updatedRawFiles = rawFiles.filter((f) => f.id !== frontId && f.id !== backId);
-      onUpdateRawFiles(updatedRawFiles);
-
-      // 7. Save locally to logged history
+      // 3. Save locally to logged history
       onAddContactToSaved(editingCard, editingCardId);
 
-      // 8. Remove the completed pair from queue
+      // 4. Remove the completed pair from queue
       onRemovePair(editingCardId);
 
-      // 9. Auto-select next pair in queue if available
+      // 5. Auto-select next pair in queue if available
       const remainingPairs = pairs.filter((p) => p.id !== editingCardId);
       if (remainingPairs.length > 0) {
         setActivePairId(remainingPairs[0].id);
@@ -354,15 +416,17 @@ export default function CardMerger({
         setActivePairId(null);
       }
 
-      alert("Successfully merged card, saved contact, and archived/deleted raw scans!");
+      alert("Successfully published contact to Google Contacts CRM!");
       
-      // Close side panel
+      // Close modal
       setEditingCard(null);
       setEditingCardId(null);
-      setCurrentMergedBlob(null);
-
+      if (mergedBlobUrl) {
+        URL.revokeObjectURL(mergedBlobUrl);
+        setMergedBlobUrl(null);
+      }
     } catch (err: any) {
-      console.error("Archiving/publishing failed:", err);
+      console.error("CRM save failed:", err);
       alert(`Operation failed: ${err.message || err}`);
     } finally {
       setIsSavingContact(false);
@@ -370,7 +434,7 @@ export default function CardMerger({
   };
 
   return (
-    <div className="grid grid-cols-1 xl:grid-cols-4 gap-6">
+    <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
       {/* Target queue workspace left panel */}
       <div className="xl:col-span-1 bg-white/[0.03] backdrop-blur-md border border-white/[0.08] shadow-[0_8px_32px_0_rgba(0,0,0,0.3)] p-5 flex flex-col h-[600px] rounded-2xl">
         <div className="flex items-center justify-between border-b border-white/[0.06] pb-3 mb-3">
@@ -498,273 +562,297 @@ export default function CardMerger({
               </div>
             </div>
 
-            {/* Editing configs */}
-            <div className="grid grid-cols-3 gap-3 mb-4 text-xs">
-              <div>
-                <label className="block text-[9px] text-slate-400 uppercase font-semibold mb-1 tracking-wider">Layout</label>
-                <div className="flex gap-1 bg-black/25 p-1 rounded-lg border border-white/[0.04]">
-                  <button
-                    type="button"
-                    onClick={() => onUpdatePair({ ...activePair, layout: "horizontal" })}
-                    className={`flex-1 flex py-1 justify-center items-center gap-1 rounded text-[10px] transition-all cursor-pointer ${
-                      activePair.layout === "horizontal"
-                        ? "bg-white/[0.08] text-white border border-white/[0.08] font-bold"
-                        : "text-slate-400 hover:text-white"
-                    }`}
+            {/* Editing configs - Hidden if card is already parsed & saved */}
+            {activePair.status !== "parsed" && activePair.status !== "saved" && (
+              <div className="grid grid-cols-3 gap-3 mb-4 text-xs">
+                <div>
+                  <label className="block text-[9px] text-slate-400 uppercase font-semibold mb-1 tracking-wider">Layout</label>
+                  <div className="flex gap-1 bg-black/25 p-1 rounded-lg border border-white/[0.04]">
+                    <button
+                      type="button"
+                      onClick={() => onUpdatePair({ ...activePair, layout: "horizontal" })}
+                      className={`flex-1 flex py-1 justify-center items-center gap-1 rounded text-[10px] transition-all cursor-pointer ${
+                        activePair.layout === "horizontal"
+                          ? "bg-white/[0.08] text-white border border-white/[0.08] font-bold"
+                          : "text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      <Columns className="w-3 h-3" /> Side-by-Side
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onUpdatePair({ ...activePair, layout: "vertical" })}
+                      className={`flex-1 flex py-1 justify-center items-center gap-1 rounded text-[10px] transition-all cursor-pointer ${
+                        activePair.layout === "vertical"
+                          ? "bg-white/[0.08] text-white border border-white/[0.08] font-bold"
+                          : "text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      <Grid className="w-3 h-3" /> Vertically Stood
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[9px] text-slate-400 uppercase font-semibold mb-1 tracking-wider">Gap Size (px)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="50"
+                    value={activePair.gapSize}
+                    onChange={(e) => onUpdatePair({ ...activePair, gapSize: parseInt(e.target.value) || 0 })}
+                    className="w-full bg-black/25 border border-white/[0.08] text-white rounded-lg p-1 text-center font-bold outline-none focus:border-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[9px] text-slate-400 uppercase font-semibold mb-1 tracking-wider">Spacer Line</label>
+                  <select
+                    value={activePair.spacerColor}
+                    onChange={(e) => onUpdatePair({ ...activePair, spacerColor: e.target.value })}
+                    className="w-full bg-black/25 border border-white/[0.08] text-white rounded-lg p-1.5 font-semibold outline-none focus:border-indigo-500"
                   >
-                    <Columns className="w-3 h-3" /> Side-by-Side
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onUpdatePair({ ...activePair, layout: "vertical" })}
-                    className={`flex-1 flex py-1 justify-center items-center gap-1 rounded text-[10px] transition-all cursor-pointer ${
-                      activePair.layout === "vertical"
-                        ? "bg-white/[0.08] text-white border border-white/[0.08] font-bold"
-                        : "text-slate-400 hover:text-white"
-                    }`}
-                  >
-                    <Grid className="w-3 h-3" /> Vertically Stood
-                  </button>
+                    <option value="#ffffff" className="bg-slate-900 text-white">White Spacer</option>
+                    <option value="#f1f5f9" className="bg-slate-900 text-white">Slate Gap</option>
+                    <option value="#0f172a" className="bg-slate-900 text-white">Dark Spacer</option>
+                    <option value="#000000" className="bg-slate-900 text-white">Black Spacer</option>
+                  </select>
                 </div>
               </div>
-
-              <div>
-                <label className="block text-[9px] text-slate-400 uppercase font-semibold mb-1 tracking-wider">Gap Size (px)</label>
-                <input
-                  type="number"
-                  min="0"
-                  max="50"
-                  value={activePair.gapSize}
-                  onChange={(e) => onUpdatePair({ ...activePair, gapSize: parseInt(e.target.value) || 0 })}
-                  className="w-full bg-black/25 border border-white/[0.08] text-white rounded-lg p-1 text-center font-bold outline-none focus:border-indigo-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[9px] text-slate-400 uppercase font-semibold mb-1 tracking-wider">Spacer Line</label>
-                <select
-                  value={activePair.spacerColor}
-                  onChange={(e) => onUpdatePair({ ...activePair, spacerColor: e.target.value })}
-                  className="w-full bg-black/25 border border-white/[0.08] text-white rounded-lg p-1.5 font-semibold outline-none focus:border-indigo-500"
-                >
-                  <option value="#ffffff" className="bg-slate-900 text-white">White Spacer</option>
-                  <option value="#f1f5f9" className="bg-slate-900 text-white">Slate Gap</option>
-                  <option value="#0f172a" className="bg-slate-900 text-white">Dark Spacer</option>
-                  <option value="#000000" className="bg-slate-900 text-white">Black Spacer</option>
-                </select>
-              </div>
-            </div>
+            )}
 
             {/* Workspace live render canvas / preview space */}
             <div className="flex-1 bg-black/20 rounded-xl border border-white/[0.06] overflow-hidden flex flex-col items-center justify-between p-4 relative">
-              <div className="flex-1 w-full flex flex-col md:flex-row gap-6 items-center justify-center overflow-y-auto max-h-[420px] p-2">
-                {/* Front side card display */}
-                <div className="flex flex-col items-center space-y-2">
-                  <span className="text-[10px] text-indigo-400 font-bold uppercase tracking-wider">
-                    Front Side Card
+              {activePair.status === "parsed" || activePair.status === "saved" ? (
+                <div className="flex-1 w-full flex flex-col items-center justify-center p-4">
+                  <span className="text-[10px] text-emerald-400 font-bold uppercase tracking-wider mb-2">
+                    Stitched Merged Business Card
                   </span>
-                  <div className="aspect-[3/2] w-56 md:w-64 overflow-hidden rounded-xl bg-black/40 shadow-lg border border-white/[0.08] relative">
-                    {activePair.frontFile.thumbnailLink ? (
+                  <div className="h-64 md:h-80 w-auto max-w-full flex items-center justify-center overflow-hidden rounded-xl bg-black/40 shadow-lg border border-white/[0.08] relative mb-6">
+                    {activePair.mergedLocalUrl ? (
                       <img
-                        src={activePair.frontFile.thumbnailLink.replace(/=s\d+/, "=s500")}
-                        alt="Front"
-                        className="w-full h-full object-contain"
+                        src={activePair.mergedLocalUrl}
+                        alt="Merged Card"
+                        className="h-full w-full object-contain"
                       />
                     ) : (
-                      <span className="text-xs text-slate-500 flex items-center justify-center h-full">Front image</span>
+                      <p className="text-xs text-slate-500">Stitched file saved on Google Drive</p>
                     )}
                   </div>
-                  
-                  {/* Front visual scroller */}
-                  <div className="w-56 md:w-64">
-                    <div className="flex gap-2 overflow-x-auto p-1.5 border border-white/[0.06] rounded-xl bg-black/30 h-20 items-center scrollbar-thin scrollbar-thumb-indigo-500/50 scrollbar-track-transparent">
-                      {rawFiles.map((file) => {
-                        const isSelected = activePair.frontFile.id === file.id;
-                        return (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingCard(activePair.parsedData || null);
+                      setEditingCardId(activePair.id);
+                      setMergedBlobUrl(activePair.mergedLocalUrl || null);
+                    }}
+                    className="px-6 py-3 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600 text-white rounded-xl text-xs font-bold transition-all shadow-md flex items-center gap-2 cursor-pointer"
+                  >
+                    <Contact className="w-4 h-4" />
+                    Review & Publish Contact
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <div className="flex-1 w-full flex flex-col md:flex-row gap-6 items-center justify-center overflow-y-auto max-h-[420px] p-2">
+                    {/* Front side card display */}
+                    <div className="flex flex-col items-center space-y-2">
+                      <span className="text-[10px] text-indigo-400 font-bold uppercase tracking-wider">
+                        Front Side Card
+                      </span>
+                      <div className="h-48 md:h-60 w-auto max-w-full flex items-center justify-center overflow-hidden rounded-xl bg-black/40 shadow-lg border border-white/[0.08] relative">
+                        {isLoadingImages ? (
+                          <div className="px-6 py-12 flex flex-col items-center gap-2">
+                            <RefreshCw className="w-5 h-5 text-indigo-400 animate-spin" />
+                            <span className="text-[10px] text-slate-500">Loading original...</span>
+                          </div>
+                        ) : frontBlobUrl ? (
+                          <img
+                            src={frontBlobUrl}
+                            alt="Front"
+                            className="h-full w-full object-contain"
+                          />
+                        ) : activePair.frontFile.thumbnailLink ? (
+                          <img
+                            src={activePair.frontFile.thumbnailLink.replace(/=s\d+/, "=s500")}
+                            alt="Front"
+                            className="h-full w-full object-contain"
+                          />
+                        ) : (
+                          <span className="text-xs text-slate-500 flex items-center justify-center h-full">Front image</span>
+                        )}
+                      </div>
+                      
+                      {/* Front visual scroller */}
+                      <div className="w-56 md:w-64">
+                        <div className="flex gap-2 overflow-x-auto p-1.5 border border-white/[0.06] rounded-xl bg-black/30 h-20 items-center scrollbar-thin scrollbar-thumb-indigo-500/50 scrollbar-track-transparent">
+                          {rawFiles.map((file) => {
+                            const isSelected = activePair.frontFile.id === file.id;
+                            return (
+                              <button
+                                key={file.id}
+                                type="button"
+                                onClick={() => {
+                                  onUpdatePair({
+                                    ...activePair,
+                                    frontFile: file,
+                                    name: file.name,
+                                  });
+                                }}
+                                className={`h-14 w-20 flex-shrink-0 rounded-lg overflow-hidden border transition-all cursor-pointer relative ${
+                                  isSelected
+                                    ? "border-indigo-500 ring-2 ring-indigo-500/25 shadow-md shadow-indigo-500/25 scale-95"
+                                    : "border-white/[0.06] hover:border-white/[0.15] opacity-70 hover:opacity-100"
+                                }`}
+                                title={file.name}
+                              >
+                                {file.thumbnailLink ? (
+                                  <img
+                                    src={file.thumbnailLink}
+                                    alt={file.name}
+                                    referrerPolicy="no-referrer"
+                                    className="w-full h-full object-cover"
+                                  />
+                                ) : (
+                                  <span className="text-[9px] text-slate-500 flex items-center justify-center h-full">No image</span>
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+
+                    <ArrowRight className="hidden md:block w-6 h-6 text-slate-500 shrink-0" />
+
+                    {/* Back side card display */}
+                    <div className="flex flex-col items-center space-y-2">
+                      <span className="text-[10px] text-indigo-400 font-bold uppercase tracking-wider">
+                        Back Side Card
+                      </span>
+                      <div className="h-48 md:h-60 w-auto max-w-full flex items-center justify-center overflow-hidden rounded-xl bg-black/40 shadow-lg border border-white/[0.08] relative">
+                        {isLoadingImages ? (
+                          <div className="px-6 py-12 flex flex-col items-center gap-2">
+                            <RefreshCw className="w-5 h-5 text-indigo-400 animate-spin" />
+                            <span className="text-[10px] text-slate-500">Loading original...</span>
+                          </div>
+                        ) : activePair.backFile ? (
+                          <>
+                            <img
+                              src={backBlobUrl || activePair.backFile.thumbnailLink?.replace(/=s\d+/, "=s500")}
+                              alt="Back"
+                              className="h-full w-full object-contain"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => onUpdatePair({ ...activePair, backFile: undefined })}
+                              className="absolute top-2 right-2 bg-black/60 hover:bg-rose-500/20 text-rose-400 p-1.5 rounded-lg border border-white/[0.06] shadow-sm transition-colors cursor-pointer"
+                              title="Clear Back Side"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </>
+                        ) : (
+                          <div className="text-center p-4 text-xs text-slate-500 flex flex-col items-center justify-center leading-normal">
+                            <span className="italic block font-semibold text-slate-400">No back side selected</span>
+                            <span className="text-[10px] opacity-65 mt-1">Select visual thumbnail below</span>
+                          </div>
+                        )}
+                      </div>
+                      
+                      {/* Back visual scroller */}
+                      <div className="w-56 md:w-64">
+                        <div className="flex gap-2 overflow-x-auto p-1.5 border border-white/[0.06] rounded-xl bg-black/30 h-20 items-center scrollbar-thin scrollbar-thumb-indigo-500/50 scrollbar-track-transparent">
+                          {/* "None" option */}
                           <button
-                            key={file.id}
                             type="button"
                             onClick={() => {
                               onUpdatePair({
                                 ...activePair,
-                                frontFile: file,
-                                name: file.name,
+                                backFile: undefined,
                               });
                             }}
-                            className={`h-14 w-20 flex-shrink-0 rounded-lg overflow-hidden border transition-all cursor-pointer relative ${
-                              isSelected
-                                ? "border-indigo-500 ring-2 ring-indigo-500/25 shadow-md shadow-indigo-500/25 scale-95"
-                                : "border-white/[0.06] hover:border-white/[0.15] opacity-70 hover:opacity-100"
+                            className={`h-14 w-20 flex-shrink-0 rounded-lg overflow-hidden border transition-all cursor-pointer flex flex-col items-center justify-center text-[9px] font-bold ${
+                              !activePair.backFile
+                                ? "border-indigo-500 bg-indigo-500/10 text-indigo-400 ring-2 ring-indigo-500/25 scale-95"
+                                : "border-white/[0.06] hover:border-white/[0.15] text-slate-400 hover:text-slate-200 bg-white/[0.02]"
                             }`}
-                            title={file.name}
                           >
-                            {file.thumbnailLink ? (
-                              <img
-                                src={file.thumbnailLink}
-                                alt={file.name}
-                                referrerPolicy="no-referrer"
-                                className="w-full h-full object-cover"
-                              />
-                            ) : (
-                              <span className="text-[9px] text-slate-500 flex items-center justify-center h-full">No image</span>
-                            )}
+                            No Back
                           </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </div>
 
-                <ArrowRight className="hidden md:block w-6 h-6 text-slate-500 shrink-0" />
-
-                {/* Back side card display */}
-                <div className="flex flex-col items-center space-y-2">
-                  <span className="text-[10px] text-indigo-400 font-bold uppercase tracking-wider">
-                    Back Side Card
-                  </span>
-                  <div className="aspect-[3/2] w-56 md:w-64 overflow-hidden rounded-xl bg-black/40 shadow-lg border border-white/[0.08] relative flex items-center justify-center">
-                    {activePair.backFile ? (
-                      <>
-                        <img
-                          src={activePair.backFile.thumbnailLink?.replace(/=s\d+/, "=s500")}
-                          alt="Back"
-                          className="w-full h-full object-contain"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => onUpdatePair({ ...activePair, backFile: undefined })}
-                          className="absolute top-2 right-2 bg-black/60 hover:bg-rose-500/20 text-rose-400 p-1.5 rounded-lg border border-white/[0.06] shadow-sm transition-colors cursor-pointer"
-                          title="Clear Back Side"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </>
-                    ) : (
-                      <div className="text-center p-4 text-xs text-slate-500 flex flex-col items-center justify-center leading-normal">
-                        <span className="italic block font-semibold text-slate-400">No back side selected</span>
-                        <span className="text-[10px] opacity-65 mt-1">Select visual thumbnail below</span>
+                          {rawFiles
+                            .filter((f) => f.id !== activePair.frontFile.id)
+                            .map((file) => {
+                              const isSelected = activePair.backFile?.id === file.id;
+                              return (
+                                <button
+                                  key={file.id}
+                                  type="button"
+                                  onClick={() => {
+                                    onUpdatePair({
+                                      ...activePair,
+                                      backFile: file,
+                                    });
+                                  }}
+                                  className={`h-14 w-20 flex-shrink-0 rounded-lg overflow-hidden border transition-all cursor-pointer relative ${
+                                    isSelected
+                                      ? "border-indigo-500 ring-2 ring-indigo-500/25 shadow-md shadow-indigo-500/25 scale-95"
+                                      : "border-white/[0.06] hover:border-white/[0.15] opacity-70 hover:opacity-100"
+                                  }`}
+                                  title={file.name}
+                                >
+                                  {file.thumbnailLink ? (
+                                    <img
+                                      src={file.thumbnailLink}
+                                      alt={file.name}
+                                      referrerPolicy="no-referrer"
+                                      className="w-full h-full object-cover"
+                                    />
+                                  ) : (
+                                    <span className="text-[9px] text-slate-500 flex items-center justify-center h-full">No image</span>
+                                  )}
+                                </button>
+                              );
+                            })}
+                        </div>
                       </div>
-                    )}
-                  </div>
-                  
-                  {/* Back visual scroller */}
-                  <div className="w-56 md:w-64">
-                    <div className="flex gap-2 overflow-x-auto p-1.5 border border-white/[0.06] rounded-xl bg-black/30 h-20 items-center scrollbar-thin scrollbar-thumb-indigo-500/50 scrollbar-track-transparent">
-                      {/* "None" option */}
-                      <button
-                        type="button"
-                        onClick={() => {
-                          onUpdatePair({
-                            ...activePair,
-                            backFile: undefined,
-                          });
-                        }}
-                        className={`h-14 w-20 flex-shrink-0 rounded-lg overflow-hidden border transition-all cursor-pointer flex flex-col items-center justify-center text-[9px] font-bold ${
-                          !activePair.backFile
-                            ? "border-indigo-500 bg-indigo-500/10 text-indigo-400 ring-2 ring-indigo-500/25 scale-95"
-                            : "border-white/[0.06] hover:border-white/[0.15] text-slate-400 hover:text-slate-200 bg-white/[0.02]"
-                        }`}
-                      >
-                        No Back
-                      </button>
-
-                      {rawFiles
-                        .filter((f) => f.id !== activePair.frontFile.id)
-                        .map((file) => {
-                          const isSelected = activePair.backFile?.id === file.id;
-                          return (
-                            <button
-                              key={file.id}
-                              type="button"
-                              onClick={() => {
-                                onUpdatePair({
-                                  ...activePair,
-                                  backFile: file,
-                                });
-                              }}
-                              className={`h-14 w-20 flex-shrink-0 rounded-lg overflow-hidden border transition-all cursor-pointer relative ${
-                                isSelected
-                                  ? "border-indigo-500 ring-2 ring-indigo-500/25 shadow-md shadow-indigo-500/25 scale-95"
-                                  : "border-white/[0.06] hover:border-white/[0.15] opacity-70 hover:opacity-100"
-                              }`}
-                              title={file.name}
-                            >
-                              {file.thumbnailLink ? (
-                                <img
-                                  src={file.thumbnailLink}
-                                  alt={file.name}
-                                  referrerPolicy="no-referrer"
-                                  className="w-full h-full object-cover"
-                                />
-                              ) : (
-                                <span className="text-[9px] text-slate-500 flex items-center justify-center h-full">No image</span>
-                              )}
-                            </button>
-                          );
-                        })}
                     </div>
                   </div>
-                </div>
-              </div>
 
-              {/* Action trigger button below images */}
-              <div className="w-full pt-4 border-t border-white/[0.06] flex justify-center shrink-0">
-                <button
-                  type="button"
-                  id="btn-stitch-and-parse"
-                  disabled={activePair.status === "parsing" || isParsingId !== null}
-                  onClick={() => handleParseCardWithAI(activePair)}
-                  className="w-full max-w-md py-3 px-6 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 hover:from-indigo-600 hover:via-purple-600 hover:to-pink-600 text-white rounded-xl text-xs font-bold transition-all shadow-[0_4px_20px_rgba(168,85,247,0.35)] hover:shadow-[0_4px_25px_rgba(168,85,247,0.6)] flex items-center justify-center gap-2 cursor-pointer"
-                >
-                  {isParsingId === activePair.id ? (
-                    <RefreshCw className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <Sparkles className="w-4 h-4" />
-                  )}
-                  Stitch and Run AI Parser
-                </button>
-              </div>
+                  {/* Action trigger button below images */}
+                  <div className="w-full pt-4 border-t border-white/[0.06] flex justify-center shrink-0">
+                    <button
+                      type="button"
+                      id="btn-stitch-and-parse"
+                      disabled={activePair.status === "parsing" || activePair.status === "saving" || isParsingId !== null}
+                      onClick={() => handleParseCardWithAI(activePair)}
+                      className="w-full max-w-md py-3 px-6 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 hover:from-indigo-600 hover:via-purple-600 hover:to-pink-600 text-white rounded-xl text-xs font-bold transition-all shadow-[0_4px_20px_rgba(168,85,247,0.35)] hover:shadow-[0_4px_25px_rgba(168,85,247,0.6)] flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                      {isParsingId === activePair.id ? (
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Sparkles className="w-4 h-4" />
+                      )}
+                      Stitch and Run AI Parser
+                    </button>
+                  </div>
+                </>
+              )}
 
               {/* Status / Log notification elements in workframe */}
-              {activePair.status !== "idle" && (
+              {activePair.status !== "idle" && activePair.status !== "parsed" && activePair.status !== "saved" && (
                 <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex flex-col items-center justify-center p-4 z-20">
                   <div className="bg-[#0e1321] border border-white/[0.1] shadow-2xl p-6 rounded-2xl max-w-sm w-full text-center space-y-4">
                     {activePair.status === "merging" || activePair.status === "saving" || activePair.status === "parsing" ? (
                       <div className="space-y-3 py-2">
                         <RefreshCw className="w-8 h-8 text-indigo-400 animate-spin mx-auto" />
-                        <h5 className="font-bold font-display text-white capitalize text-sm">{activePair.status} Card...</h5>
+                        <h5 className="font-bold font-display text-white capitalize text-sm">
+                          {activePair.status === "parsing" ? "AI Profiling Card..." : activePair.status === "saving" ? "Saving Stitched Image..." : "Stitching Card Layout..."}
+                        </h5>
                         <p className="text-xs text-slate-400 leading-relaxed">
                           Synchronizing binary structures with workspace directories & running Gemini AI parsing. Please wait.
                         </p>
-                      </div>
-                    ) : activePair.status === "saved" || activePair.status === "parsed" ? (
-                      <div className="space-y-3 text-center">
-                        <CheckCircle className="w-8 h-8 text-emerald-400 mx-auto" />
-                        <h5 className="font-bold font-display text-white text-sm">Combined Card Complete</h5>
-                        <p className="text-xs text-slate-400 leading-relaxed">
-                          {activePair.status === "saved"
-                            ? "Stitched visual card document successfully uploaded and synchronized into Merged_Bus_Cards folder."
-                            : "Gemini AI profile extraction completed. Review details inside CRM sheet."}
-                        </p>
-                        <div className="pt-2 flex gap-2 justify-center">
-                          {activePair.mergedFileId && (
-                            <a
-                              href={`https://drive.google.com/file/d/${activePair.mergedFileId}/view`}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="px-3 py-1.5 bg-white/[0.05] border border-white/[0.08] text-slate-200 hover:bg-white/[0.1] rounded-lg text-xs font-semibold transition-colors animate-pulse"
-                            >
-                              View on Drive
-                            </a>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => onUpdatePair({ ...activePair, status: "idle" })}
-                            className="px-3.5 py-1.5 bg-gradient-to-r from-indigo-500 to-blue-500 hover:from-indigo-600 hover:to-blue-600 text-white rounded-lg text-xs font-semibold cursor-pointer shadow-md transition-all"
-                          >
-                            Dismiss Window
-                          </button>
-                        </div>
                       </div>
                     ) : (
                       <div className="space-y-3 text-center">
@@ -796,164 +884,200 @@ export default function CardMerger({
         )}
       </div>
 
-      {/* Structured parsed details contact cards right sheet */}
-      <div className="xl:col-span-1 bg-white/[0.03] backdrop-blur-md border border-white/[0.08] shadow-[0_8px_32px_0_rgba(0,0,0,0.3)] p-5 flex flex-col h-[600px] overflow-hidden rounded-2xl">
-        <div className="flex items-center justify-between border-b border-white/[0.06] pb-3 mb-3">
-          <div className="flex items-center gap-1.5">
-            <Contact className="w-4 h-4 text-indigo-400" />
-            <h3 className="font-semibold text-white font-display text-sm">CRM AI Contact Panel</h3>
+      {/* Lightbox Modal review overlay for editing and saving CRM Contacts */}
+      {editingCard && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md overflow-y-auto">
+          <div className="bg-[#0e1321]/95 border border-white/[0.1] shadow-2xl rounded-2xl max-w-5xl w-full flex flex-col md:flex-row max-h-[90vh] overflow-hidden">
+            {/* Left Column: Merged Card Preview */}
+            <div className="flex-1 flex flex-col bg-black/30 p-6 border-r border-white/[0.08] overflow-y-auto min-w-0">
+              <div className="flex items-center justify-between mb-4">
+                <h4 className="text-xs font-bold text-indigo-400 uppercase tracking-wider">Merged Image</h4>
+                <span className="text-[10px] text-slate-400 uppercase font-medium">Stitched & Saved to Google Drive</span>
+              </div>
+              
+              <div className="flex-1 flex items-center justify-center bg-black/20 rounded-xl p-4 border border-white/[0.05] min-h-[300px]">
+                {mergedBlobUrl ? (
+                  <img
+                    src={mergedBlobUrl}
+                    alt="Merged Card"
+                    className="max-w-full max-h-[60vh] object-contain rounded-lg shadow-lg border border-white/[0.08]"
+                  />
+                ) : activePair?.mergedLocalUrl ? (
+                  <img
+                    src={activePair.mergedLocalUrl}
+                    alt="Merged Card"
+                    className="max-w-full max-h-[60vh] object-contain rounded-lg shadow-lg border border-white/[0.08]"
+                  />
+                ) : (
+                  <p className="text-xs text-slate-500">No merged preview available</p>
+                )}
+              </div>
+            </div>
+
+            {/* Right Column: Editable Contact Fields */}
+            <div className="w-full md:w-[420px] flex flex-col p-6 overflow-hidden shrink-0">
+              <div className="flex items-center justify-between border-b border-white/[0.08] pb-4 mb-4">
+                <div className="flex items-center gap-2">
+                  <Contact className="w-5 h-5 text-indigo-400" />
+                  <h3 className="font-bold text-white font-display text-sm">Review CRM Contact</h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingCard(null);
+                    setEditingCardId(null);
+                  }}
+                  className="p-1 hover:bg-white/[0.08] rounded-lg text-slate-400 hover:text-white transition-colors"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Form Fields container */}
+              <div className="flex-1 overflow-y-auto space-y-4 pr-1 pb-4 text-xs scrollbar-thin scrollbar-thumb-indigo-500/50 scrollbar-track-transparent">
+                <div>
+                  <label className="block text-[9px] text-slate-400 uppercase font-semibold mb-1 tracking-wider">Name *</label>
+                  <input
+                    type="text"
+                    value={editingCard.name}
+                    onChange={(e) => setEditingCard({ ...editingCard, name: e.target.value })}
+                    className="w-full bg-white/[0.02] border border-white/[0.08] rounded-lg p-2 focus:bg-white/[0.06] text-white font-bold tracking-tight focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[9px] text-slate-400 uppercase font-semibold mb-1 tracking-wider">Company</label>
+                  <input
+                    type="text"
+                    value={editingCard.company}
+                    onChange={(e) => setEditingCard({ ...editingCard, company: e.target.value })}
+                    className="w-full bg-white/[0.02] border border-white/[0.08] rounded-lg p-2 focus:bg-white/[0.06] text-white focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[9px] text-slate-400 uppercase font-semibold mb-1 tracking-wider">Job Title</label>
+                  <input
+                    type="text"
+                    value={editingCard.title}
+                    onChange={(e) => setEditingCard({ ...editingCard, title: e.target.value })}
+                    className="w-full bg-white/[0.02] border border-white/[0.08] rounded-lg p-2 focus:bg-white/[0.06] text-white focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[9px] text-slate-400 uppercase font-semibold mb-1 tracking-wider">Emails</label>
+                  <input
+                    type="text"
+                    value={editingCard.emails.join(", ")}
+                    onChange={(e) =>
+                      setEditingCard({
+                        ...editingCard,
+                        emails: e.target.value.split(",").map((em) => em.trim()).filter(Boolean),
+                      })
+                    }
+                    placeholder="name@company.com"
+                    className="w-full bg-white/[0.02] border border-white/[0.08] rounded-lg p-2 focus:bg-white/[0.06] text-white focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[9px] text-slate-400 uppercase font-semibold mb-1 tracking-wider">Phone Numbers</label>
+                  <input
+                    type="text"
+                    value={editingCard.phones.join(", ")}
+                    onChange={(e) =>
+                      setEditingCard({
+                        ...editingCard,
+                        phones: e.target.value.split(",").map((ph) => ph.trim()).filter(Boolean),
+                      })
+                    }
+                    placeholder="+1 234 567 8900"
+                    className="w-full bg-white/[0.02] border border-white/[0.08] rounded-lg p-2 focus:bg-white/[0.06] text-white focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[9px] text-slate-400 uppercase font-semibold mb-1 tracking-wider">Company Websites</label>
+                  <input
+                    type="text"
+                    value={editingCard.websites.join(", ")}
+                    onChange={(e) =>
+                      setEditingCard({
+                        ...editingCard,
+                        websites: e.target.value.split(",").map((w) => w.trim()).filter(Boolean),
+                      })
+                    }
+                    placeholder="www.company.com"
+                    className="w-full bg-white/[0.02] border border-white/[0.08] rounded-lg p-2 focus:bg-white/[0.06] text-white focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[9px] text-slate-400 uppercase font-semibold mb-1 tracking-wider">Address</label>
+                  <textarea
+                    value={editingCard.address}
+                    onChange={(e) => setEditingCard({ ...editingCard, address: e.target.value })}
+                    className="w-full bg-white/[0.02] border border-white/[0.08] rounded-lg p-2 focus:bg-white/[0.06] text-white focus:outline-none focus:border-indigo-500 resize-none h-16"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[9px] text-slate-400 uppercase font-semibold mb-1 tracking-wider">LinkedIn / Socials</label>
+                  <input
+                    type="text"
+                    value={editingCard.socials.join(", ")}
+                    onChange={(e) =>
+                      setEditingCard({
+                        ...editingCard,
+                        socials: e.target.value.split(",").map((s) => s.trim()).filter(Boolean),
+                      })
+                    }
+                    className="w-full bg-white/[0.02] border border-white/[0.08] rounded-lg p-2 focus:bg-white/[0.06] text-white focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[9px] text-slate-400 uppercase font-semibold mb-1 tracking-wider">AI Card Insights</label>
+                  <textarea
+                    value={editingCard.notes}
+                    onChange={(e) => setEditingCard({ ...editingCard, notes: e.target.value })}
+                    className="w-full bg-white/[0.02] border border-white/[0.08] rounded-lg p-2 focus:bg-white/[0.06] text-white focus:outline-none focus:border-indigo-500 resize-none h-16"
+                  />
+                </div>
+              </div>
+
+              {/* Modal Buttons */}
+              <div className="border-t border-white/[0.08] pt-4 space-y-2 shrink-0">
+                <button
+                  type="button"
+                  id="btn-save-contact-modal"
+                  disabled={isSavingContact || !editingCard.name}
+                  onClick={handleSaveToGoogleContacts}
+                  className="w-full py-3 bg-gradient-to-r from-indigo-500 to-blue-500 hover:from-indigo-600 hover:to-blue-600 disabled:opacity-40 text-white text-xs font-bold rounded-xl shadow-lg hover:shadow-indigo-500/20 transition-all flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  {isSavingContact ? (
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Users className="w-4 h-4" />
+                  )}
+                  Publish to Google Contacts
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingCard(null);
+                    setEditingCardId(null);
+                  }}
+                  className="w-full py-2 bg-white/[0.02] hover:bg-white/[0.06] border border-white/[0.06] text-slate-400 hover:text-slate-200 text-xs font-semibold rounded-lg text-center cursor-pointer transition-colors"
+                >
+                  Close / Cancel
+                </button>
+              </div>
+            </div>
           </div>
         </div>
-
-        {editingCard ? (
-          <div className="flex-1 flex flex-col h-full overflow-hidden text-xs">
-            <div className="flex-1 overflow-y-auto space-y-3 pr-1 pb-4">
-              <div>
-                <label className="block text-[9px] text-slate-400 uppercase font-semibold mb-1 tracking-wider">Name *</label>
-                <input
-                  type="text"
-                  value={editingCard.name}
-                  onChange={(e) => setEditingCard({ ...editingCard, name: e.target.value })}
-                  className="w-full bg-white/[0.02] border border-white/[0.08] rounded-lg p-1.5 focus:bg-white/[0.06] text-white font-bold tracking-tight focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[9px] text-slate-400 uppercase font-semibold mb-1 tracking-wider">Company</label>
-                <input
-                  type="text"
-                  value={editingCard.company}
-                  onChange={(e) => setEditingCard({ ...editingCard, company: e.target.value })}
-                  className="w-full bg-white/[0.02] border border-white/[0.08] rounded-lg p-1.5 focus:bg-white/[0.06] text-white focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[9px] text-slate-400 uppercase font-semibold mb-1 tracking-wider">Job Title</label>
-                <input
-                  type="text"
-                  value={editingCard.title}
-                  onChange={(e) => setEditingCard({ ...editingCard, title: e.target.value })}
-                  className="w-full bg-white/[0.02] border border-white/[0.08] rounded-lg p-1.5 focus:bg-white/[0.06] text-white focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[9px] text-slate-400 uppercase font-semibold mb-1 tracking-wider">Emails</label>
-                <input
-                  type="text"
-                  value={editingCard.emails.join(", ")}
-                  onChange={(e) =>
-                    setEditingCard({
-                      ...editingCard,
-                      emails: e.target.value.split(",").map((em) => em.trim()).filter(Boolean),
-                    })
-                  }
-                  placeholder="name@company.com"
-                  className="w-full bg-white/[0.02] border border-white/[0.08] rounded-lg p-1.5 focus:bg-white/[0.06] text-white focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[9px] text-slate-400 uppercase font-semibold mb-1 tracking-wider">Phone Numbers</label>
-                <input
-                  type="text"
-                  value={editingCard.phones.join(", ")}
-                  onChange={(e) =>
-                    setEditingCard({
-                      ...editingCard,
-                      phones: e.target.value.split(",").map((ph) => ph.trim()).filter(Boolean),
-                    })
-                  }
-                  placeholder="+65 1234 5678"
-                  className="w-full bg-white/[0.02] border border-white/[0.08] rounded-lg p-1.5 focus:bg-white/[0.06] text-white focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[9px] text-slate-400 uppercase font-semibold mb-1 tracking-wider">Company Websites</label>
-                <input
-                  type="text"
-                  value={editingCard.websites.join(", ")}
-                  onChange={(e) =>
-                    setEditingCard({
-                      ...editingCard,
-                      websites: e.target.value.split(",").map((w) => w.trim()).filter(Boolean),
-                    })
-                  }
-                  placeholder="www.company.com"
-                  className="w-full bg-white/[0.02] border border-white/[0.08] rounded-lg p-1.5 focus:bg-white/[0.06] text-white focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[9px] text-slate-400 uppercase font-semibold mb-1 tracking-wider">Address</label>
-                <textarea
-                  value={editingCard.address}
-                  onChange={(e) => setEditingCard({ ...editingCard, address: e.target.value })}
-                  className="w-full bg-white/[0.02] border border-white/[0.08] rounded-lg p-1.5 focus:bg-white/[0.06] text-white focus:outline-none focus:border-indigo-500 resize-none h-14"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[9px] text-slate-400 uppercase font-semibold mb-1 tracking-wider">LinkedIn / Socials</label>
-                <input
-                  type="text"
-                  value={editingCard.socials.join(", ")}
-                  onChange={(e) =>
-                    setEditingCard({
-                      ...editingCard,
-                      socials: e.target.value.split(",").map((s) => s.trim()).filter(Boolean),
-                    })
-                  }
-                  className="w-full bg-white/[0.02] border border-white/[0.08] rounded-lg p-1.5 focus:bg-white/[0.06] text-white focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[9px] text-slate-400 uppercase font-semibold mb-1 tracking-wider">AI Card Insights</label>
-                <textarea
-                  value={editingCard.notes}
-                  onChange={(e) => setEditingCard({ ...editingCard, notes: e.target.value })}
-                  className="w-full bg-white/[0.02] border border-white/[0.08] rounded-lg p-1.5 focus:bg-white/[0.06] text-white focus:outline-none focus:border-indigo-500 resize-none h-16"
-                />
-              </div>
-            </div>
-
-            <div className="border-t border-white/[0.06] pt-3 space-y-2 shrink-0">
-              <button
-                type="button"
-                id="btn-save-contact"
-                disabled={isSavingContact || !editingCard.name}
-                onClick={handleSaveToGoogleContacts}
-                className="w-full py-2.5 bg-gradient-to-r from-indigo-500 to-blue-500 hover:from-indigo-600 hover:to-blue-600 disabled:opacity-40 text-white text-xs font-bold rounded-xl shadow-md transition-all flex items-center justify-center gap-1.5 cursor-pointer"
-              >
-                {isSavingContact ? (
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <Users className="w-3.5 h-3.5" />
-                )}
-                Publish to Contacts
-              </button>
-              <button
-                type="button"
-                onClick={() => setEditingCard(null)}
-                className="w-full py-1.5 bg-white/[0.02] hover:bg-white/[0.06] border border-white/[0.06] text-slate-400 hover:text-slate-200 text-[10px] font-semibold rounded-lg text-center cursor-pointer transition-colors"
-              >
-                Discard / Cancel
-              </button>
-            </div>
-          </div>
-        ) : (
-          <div className="flex-1 flex flex-col items-center justify-center text-center p-4 text-slate-400 bg-white/[0.01] border border-dashed border-white/[0.04] rounded-xl">
-            <Sparkles className="w-10 h-10 text-slate-700 animate-pulse mb-3" />
-            <p className="text-xs font-semibold text-slate-300">No Parsed Contact Selected</p>
-            <p className="text-[10px] text-slate-500 font-medium leading-relaxed px-2 mt-1.5">
-              Select any card in your workspace or scanned files directory, and run the <strong>AI Parser</strong> to extract structure coordinates directly into this editable sheet.
-            </p>
-          </div>
-        )}
-      </div>
+      )}
     </div>
   );
 }
