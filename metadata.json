@@ -1,0 +1,6 @@
+{
+  "name": "Business Card Merger & AI Parser",
+  "description": "An elegant full-stack utility to organize, merge front/back scans of business cards into single images on Google Drive, and parse them with Gemini AI to sync directly with Google Contacts.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
