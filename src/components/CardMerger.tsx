@@ -14,6 +14,8 @@ import {
   Contact,
   Users,
   X,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { CardPair, ParsedCard, DriveFile } from "../types";
 
@@ -433,6 +435,62 @@ export default function CardMerger({
     }
   };
 
+  const handleSelectPrevFront = () => {
+    if (rawFiles.length === 0 || !activePair) return;
+    const currentIdx = rawFiles.findIndex((f) => f.id === activePair.frontFile.id);
+    const newIdx = (currentIdx - 1 + rawFiles.length) % rawFiles.length;
+    const newFile = rawFiles[newIdx];
+    onUpdatePair({
+      ...activePair,
+      frontFile: newFile,
+      name: newFile.name,
+    });
+  };
+
+  const handleSelectNextFront = () => {
+    if (rawFiles.length === 0 || !activePair) return;
+    const currentIdx = rawFiles.findIndex((f) => f.id === activePair.frontFile.id);
+    const newIdx = (currentIdx + 1) % rawFiles.length;
+    const newFile = rawFiles[newIdx];
+    onUpdatePair({
+      ...activePair,
+      frontFile: newFile,
+      name: newFile.name,
+    });
+  };
+
+  const handleSelectPrevBack = () => {
+    if (rawFiles.length === 0 || !activePair) return;
+    const backCandidates = rawFiles.filter((f) => f.id !== activePair.frontFile.id);
+    if (backCandidates.length === 0) return;
+
+    let newIdx = backCandidates.length - 1;
+    if (activePair.backFile) {
+      const currentIdx = backCandidates.findIndex((f) => f.id === activePair.backFile?.id);
+      newIdx = (currentIdx - 1 + backCandidates.length) % backCandidates.length;
+    }
+    onUpdatePair({
+      ...activePair,
+      backFile: backCandidates[newIdx],
+    });
+  };
+
+  const handleSelectNextBack = () => {
+    if (rawFiles.length === 0 || !activePair) return;
+    const backCandidates = rawFiles.filter((f) => f.id !== activePair.frontFile.id);
+    if (backCandidates.length === 0) return;
+
+    let newIdx = 0;
+    if (activePair.backFile) {
+      const currentIdx = backCandidates.findIndex((f) => f.id === activePair.backFile?.id);
+      newIdx = (currentIdx + 1) % backCandidates.length;
+    }
+    onUpdatePair({
+      ...activePair,
+      backFile: backCandidates[newIdx],
+    });
+  };
+
   return (
     <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
       {/* Target queue workspace left panel */}
@@ -660,27 +718,47 @@ export default function CardMerger({
                       <span className="text-[10px] text-indigo-400 font-bold uppercase tracking-wider">
                         Front Side Card
                       </span>
-                      <div className="h-48 md:h-60 w-auto max-w-full flex items-center justify-center overflow-hidden rounded-xl bg-black/40 shadow-lg border border-white/[0.08] relative">
-                        {isLoadingImages ? (
-                          <div className="px-6 py-12 flex flex-col items-center gap-2">
-                            <RefreshCw className="w-5 h-5 text-indigo-400 animate-spin" />
-                            <span className="text-[10px] text-slate-500">Loading original...</span>
-                          </div>
-                        ) : frontBlobUrl ? (
-                          <img
-                            src={frontBlobUrl}
-                            alt="Front"
-                            className="h-full w-full object-contain"
-                          />
-                        ) : activePair.frontFile.thumbnailLink ? (
-                          <img
-                            src={activePair.frontFile.thumbnailLink.replace(/=s\d+/, "=s500")}
-                            alt="Front"
-                            className="h-full w-full object-contain"
-                          />
-                        ) : (
-                          <span className="text-xs text-slate-500 flex items-center justify-center h-full">Front image</span>
-                        )}
+                      <div className="flex items-center gap-3 w-full justify-center">
+                        <button
+                          type="button"
+                          onClick={handleSelectPrevFront}
+                          className="p-2.5 bg-gradient-to-tr from-indigo-500 to-indigo-600 hover:from-indigo-600 hover:to-indigo-700 text-white rounded-full border border-indigo-400/30 shadow-lg hover:shadow-indigo-500/20 hover:scale-105 active:scale-95 transition-all shrink-0 cursor-pointer flex items-center justify-center"
+                          title="Previous Front Card"
+                        >
+                          <ChevronLeft className="w-5 h-5 font-bold" />
+                        </button>
+
+                        <div className="h-48 md:h-60 w-56 md:w-64 flex items-center justify-center overflow-hidden rounded-xl bg-black/40 shadow-lg border border-white/[0.08] relative">
+                          {isLoadingImages ? (
+                            <div className="px-6 py-12 flex flex-col items-center gap-2">
+                              <RefreshCw className="w-5 h-5 text-indigo-400 animate-spin" />
+                              <span className="text-[10px] text-slate-500">Loading original...</span>
+                            </div>
+                          ) : frontBlobUrl ? (
+                            <img
+                              src={frontBlobUrl}
+                              alt="Front"
+                              className="h-full w-full object-contain"
+                            />
+                          ) : activePair.frontFile.thumbnailLink ? (
+                            <img
+                              src={activePair.frontFile.thumbnailLink.replace(/=s\d+/, "=s500")}
+                              alt="Front"
+                              className="h-full w-full object-contain"
+                            />
+                          ) : (
+                            <span className="text-xs text-slate-500 flex items-center justify-center h-full">Front image</span>
+                          )}
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={handleSelectNextFront}
+                          className="p-2.5 bg-gradient-to-tr from-indigo-500 to-indigo-600 hover:from-indigo-600 hover:to-indigo-700 text-white rounded-full border border-indigo-400/30 shadow-lg hover:shadow-indigo-500/20 hover:scale-105 active:scale-95 transition-all shrink-0 cursor-pointer flex items-center justify-center"
+                          title="Next Front Card"
+                        >
+                          <ChevronRight className="w-5 h-5 font-bold" />
+                        </button>
                       </div>
                       
                       {/* Front visual scroller */}
@@ -730,34 +808,54 @@ export default function CardMerger({
                       <span className="text-[10px] text-indigo-400 font-bold uppercase tracking-wider">
                         Back Side Card
                       </span>
-                      <div className="h-48 md:h-60 w-auto max-w-full flex items-center justify-center overflow-hidden rounded-xl bg-black/40 shadow-lg border border-white/[0.08] relative">
-                        {isLoadingImages ? (
-                          <div className="px-6 py-12 flex flex-col items-center gap-2">
-                            <RefreshCw className="w-5 h-5 text-indigo-400 animate-spin" />
-                            <span className="text-[10px] text-slate-500">Loading original...</span>
-                          </div>
-                        ) : activePair.backFile ? (
-                          <>
-                            <img
-                              src={backBlobUrl || activePair.backFile.thumbnailLink?.replace(/=s\d+/, "=s500")}
-                              alt="Back"
-                              className="h-full w-full object-contain"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => onUpdatePair({ ...activePair, backFile: undefined })}
-                              className="absolute top-2 right-2 bg-black/60 hover:bg-rose-500/20 text-rose-400 p-1.5 rounded-lg border border-white/[0.06] shadow-sm transition-colors cursor-pointer"
-                              title="Clear Back Side"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </>
-                        ) : (
-                          <div className="text-center p-4 text-xs text-slate-500 flex flex-col items-center justify-center leading-normal">
-                            <span className="italic block font-semibold text-slate-400">No back side selected</span>
-                            <span className="text-[10px] opacity-65 mt-1">Select visual thumbnail below</span>
-                          </div>
-                        )}
+                      <div className="flex items-center gap-3 w-full justify-center">
+                        <button
+                          type="button"
+                          onClick={handleSelectPrevBack}
+                          className="p-2.5 bg-gradient-to-tr from-indigo-500 to-indigo-600 hover:from-indigo-600 hover:to-indigo-700 text-white rounded-full border border-indigo-400/30 shadow-lg hover:shadow-indigo-500/20 hover:scale-105 active:scale-95 transition-all shrink-0 cursor-pointer flex items-center justify-center"
+                          title="Previous Back Card"
+                        >
+                          <ChevronLeft className="w-5 h-5 font-bold" />
+                        </button>
+
+                        <div className="h-48 md:h-60 w-56 md:w-64 flex items-center justify-center overflow-hidden rounded-xl bg-black/40 shadow-lg border border-white/[0.08] relative">
+                          {isLoadingImages ? (
+                            <div className="px-6 py-12 flex flex-col items-center gap-2">
+                              <RefreshCw className="w-5 h-5 text-indigo-400 animate-spin" />
+                              <span className="text-[10px] text-slate-500">Loading original...</span>
+                            </div>
+                          ) : activePair.backFile ? (
+                            <>
+                              <img
+                                src={backBlobUrl || activePair.backFile.thumbnailLink?.replace(/=s\d+/, "=s500")}
+                                alt="Back"
+                                className="h-full w-full object-contain"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => onUpdatePair({ ...activePair, backFile: undefined })}
+                                className="absolute top-2 right-2 bg-black/60 hover:bg-rose-500/20 text-rose-400 p-1.5 rounded-lg border border-white/[0.06] shadow-sm transition-colors cursor-pointer"
+                                title="Clear Back Side"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </>
+                          ) : (
+                            <div className="text-center p-4 text-xs text-slate-500 flex flex-col items-center justify-center leading-normal">
+                              <span className="italic block font-semibold text-slate-400">No back side selected</span>
+                              <span className="text-[10px] opacity-65 mt-1">Select visual thumbnail below</span>
+                            </div>
+                          )}
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={handleSelectNextBack}
+                          className="p-2.5 bg-gradient-to-tr from-indigo-500 to-indigo-600 hover:from-indigo-600 hover:to-indigo-700 text-white rounded-full border border-indigo-400/30 shadow-lg hover:shadow-indigo-500/20 hover:scale-105 active:scale-95 transition-all shrink-0 cursor-pointer flex items-center justify-center"
+                          title="Next Back Card"
+                        >
+                          <ChevronRight className="w-5 h-5 font-bold" />
+                        </button>
                       </div>
                       
                       {/* Back visual scroller */}
