@@ -60,6 +60,10 @@ export default function CardMerger({
   const [isLoadingImages, setIsLoadingImages] = useState(false);
   const [mergedBlobUrl, setMergedBlobUrl] = useState<string | null>(null);
 
+  // Manual trashing selection states
+  const [selectedPairIds, setSelectedPairIds] = useState<string[]>([]);
+  const [isDeletingSelected, setIsDeletingSelected] = useState(false);
+
   // Filter pairs
   useEffect(() => {
     if (pairs.length > 0 && !activePairId) {
@@ -491,16 +495,90 @@ export default function CardMerger({
     });
   };
 
+  const handleToggleSelectPair = (pairId: string, checked: boolean) => {
+    if (checked) {
+      setSelectedPairIds((prev) => [...prev, pairId]);
+    } else {
+      setSelectedPairIds((prev) => prev.filter((id) => id !== pairId));
+    }
+  };
+
+  const handleDeleteSelectedManual = async () => {
+    if (selectedPairIds.length === 0 || !token) return;
+    if (!window.confirm(`Are you sure you want to permanently delete the raw scans for the ${selectedPairIds.length} selected items from Google Drive?`)) {
+      return;
+    }
+
+    setIsDeletingSelected(true);
+    try {
+      const { trashFileFromDrive } = await import("../utils/driveApi");
+
+      // Collect all file IDs to delete
+      const fileIdsToDelete = new Set<string>();
+      selectedPairIds.forEach((id) => {
+        const pair = pairs.find((p) => p.id === id);
+        if (pair) {
+          fileIdsToDelete.add(pair.frontFile.id);
+          if (pair.backFile) {
+            fileIdsToDelete.add(pair.backFile.id);
+          }
+        }
+      });
+
+      // Delete them from Drive
+      for (const fileId of fileIdsToDelete) {
+        try {
+          console.log(`Manually trashing file: ${fileId}`);
+          await trashFileFromDrive(token, fileId);
+        } catch (err) {
+          console.error(`Failed to manually trash file ${fileId}:`, err);
+        }
+      }
+
+      // Update local rawFiles state by filtering out deleted ones
+      const updatedRawFiles = rawFiles.filter((f) => !fileIdsToDelete.has(f.id));
+      onUpdateRawFiles(updatedRawFiles);
+
+      // Remove these pairs from the Review Queue
+      selectedPairIds.forEach((id) => {
+        onRemovePair(id);
+      });
+
+      setSelectedPairIds([]);
+      alert("Successfully deleted selected raw scans from Google Drive and cleared them from the queue.");
+    } catch (err: any) {
+      console.error("Manual deletion failed:", err);
+      alert(`Manual deletion failed: ${err.message || err}`);
+    } finally {
+      setIsDeletingSelected(false);
+    }
+  };
+
   return (
     <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
       {/* Target queue workspace left panel */}
       <div className="xl:col-span-1 bg-white/[0.03] backdrop-blur-md border border-white/[0.08] shadow-[0_8px_32px_0_rgba(0,0,0,0.3)] p-5 flex flex-col h-[600px] rounded-2xl">
         <div className="flex items-center justify-between border-b border-white/[0.06] pb-3 mb-3">
-          <div className="flex items-center gap-1.5">
-            <Sliders className="w-4 h-4 text-indigo-400" />
-            <h3 className="font-semibold text-white font-display text-sm">Review Queue</h3>
+          <div className="flex items-center gap-1.5 min-w-0">
+            {pairs.length > 0 && (
+              <input
+                type="checkbox"
+                checked={selectedPairIds.length === pairs.length}
+                onChange={(e) => {
+                  if (e.target.checked) {
+                    setSelectedPairIds(pairs.map((p) => p.id));
+                  } else {
+                    setSelectedPairIds([]);
+                  }
+                }}
+                className="w-4 h-4 rounded border-white/[0.08] bg-black/25 text-indigo-500 focus:ring-indigo-500 mr-1.5 shrink-0 cursor-pointer"
+                title="Select All Queue Items"
+              />
+            )}
+            <Sliders className="w-4 h-4 text-indigo-400 shrink-0" />
+            <h3 className="font-semibold text-white font-display text-sm truncate">Review Queue</h3>
           </div>
-          <span className="bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 text-xs font-semibold px-2.5 py-0.5 rounded-full">
+          <span className="bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 text-xs font-semibold px-2.5 py-0.5 rounded-full shrink-0">
             {pairs.length} Items
           </span>
         </div>
@@ -526,25 +604,34 @@ export default function CardMerger({
                       : "border-white/[0.04] hover:border-white/[0.1] bg-white/[0.01]"
                   }`}
                 >
-                  <div className="min-w-0 flex-1">
-                    <p className="text-xs font-semibold text-white truncate leading-snug">
-                      {pair.frontFile.name}
-                    </p>
-                    <div className="flex items-center gap-2 mt-1">
-                      <span className="text-[10px] text-slate-400 capitalize">{pair.layout} card</span>
-                      <span
-                        className={`text-[9px] px-1.5 py-0.5 rounded-full font-semibold capitalize ${
-                          pair.status === "saved" || pair.status === "parsed"
-                            ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
-                            : pair.status === "error"
-                            ? "bg-rose-500/10 text-rose-400 border border-rose-500/20"
-                            : pair.status === "merging" || pair.status === "saving" || pair.status === "parsing"
-                            ? "bg-amber-500/10 text-amber-400 border border-amber-500/20 animate-pulse"
-                            : "bg-white/[0.04] text-slate-400 border border-white/[0.04]"
-                        }`}
-                      >
-                        {pair.status}
-                      </span>
+                  <div className="flex items-center min-w-0 flex-1">
+                    <input
+                      type="checkbox"
+                      checked={selectedPairIds.includes(pair.id)}
+                      onChange={(e) => handleToggleSelectPair(pair.id, e.target.checked)}
+                      onClick={(e) => e.stopPropagation()}
+                      className="w-4 h-4 rounded border-white/[0.08] bg-black/25 text-indigo-500 focus:ring-indigo-500 mr-2.5 shrink-0 cursor-pointer"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs font-semibold text-white truncate leading-snug">
+                        {pair.frontFile.name}
+                      </p>
+                      <div className="flex items-center gap-2 mt-1">
+                        <span className="text-[10px] text-slate-400 capitalize">{pair.layout} card</span>
+                        <span
+                          className={`text-[9px] px-1.5 py-0.5 rounded-full font-semibold capitalize ${
+                            pair.status === "saved" || pair.status === "parsed"
+                              ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                              : pair.status === "error"
+                              ? "bg-rose-500/10 text-rose-400 border border-rose-500/20"
+                              : pair.status === "merging" || pair.status === "saving" || pair.status === "parsing"
+                              ? "bg-amber-500/10 text-amber-400 border border-amber-500/20 animate-pulse"
+                              : "bg-white/[0.04] text-slate-400 border border-white/[0.04]"
+                          }`}
+                        >
+                          {pair.status}
+                        </span>
+                      </div>
                     </div>
                   </div>
 
@@ -567,6 +654,22 @@ export default function CardMerger({
 
         {pairs.length > 0 && (
           <div className="pt-3 border-t border-white/[0.06] space-y-2">
+            {selectedPairIds.length > 0 && (
+              <button
+                type="button"
+                id="btn-delete-selected-manual"
+                disabled={isDeletingSelected}
+                onClick={handleDeleteSelectedManual}
+                className="w-full py-2.5 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 hover:text-rose-300 text-xs font-bold rounded-xl border border-rose-500/20 hover:border-rose-500/40 transition-all shadow-md flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                {isDeletingSelected ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Trash2 className="w-3.5 h-3.5" />
+                )}
+                Delete Selected Raw ({selectedPairIds.length})
+              </button>
+            )}
             <button
               type="button"
               id="btn-multi-save"
